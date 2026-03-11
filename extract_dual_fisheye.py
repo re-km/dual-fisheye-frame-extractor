@@ -275,6 +275,7 @@ def extract_test_frame(input_path: Path, test_dir: Path, stream_index: int,
     cmd = [
         "ffmpeg", "-v", "warning",
         "-noautorotate",
+        "-ss", "10",
         "-i", str(input_path),
         "-map", f"0:v:{stream_index}",
         "-vf", vf,
@@ -458,18 +459,35 @@ def extract_frames_sharp(
     vf = ",".join(vf_parts)
 
     out_pattern = output_dir / f"{prefix}_%04d.{ext}"
+
+    # フィルタが長い場合は -filter_script:v を使用（Windows コマンドライン長制限対策）
+    filter_script_file = None
+    if len(vf) > 8000:
+        filter_script_file = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", prefix="ffmpeg_filter_",
+            delete=False, encoding="utf-8")
+        filter_script_file.write(vf)
+        filter_script_file.close()
+        filter_args = ["-filter_script:v", filter_script_file.name]
+    else:
+        filter_args = ["-vf", vf]
+
     cmd = [
         "ffmpeg", "-v", "warning",
         "-noautorotate",
         "-i", str(input_path),
         "-map", f"0:v:{stream_index}",
-        "-vf", vf,
+        *filter_args,
         "-vsync", "vfr",
         *build_output_args(fmt, quality),
         "-start_number", "1",
         str(out_pattern),
     ]
-    run_cmd(cmd)
+    try:
+        run_cmd(cmd)
+    finally:
+        if filter_script_file:
+            Path(filter_script_file.name).unlink(missing_ok=True)
     return len(list(output_dir.glob(f"{prefix}_*.{ext}")))
 
 
