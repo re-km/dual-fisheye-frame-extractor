@@ -1,37 +1,40 @@
 # Dual Fisheye Frame Extractor
 
-DJI Osmo 360（`.osv`）/ Insta360（`.insv`）などのデュアル魚眼動画から、Agisoft Metashape用のフレーム画像を抽出するCLIツールです。
+DJI Osmo 360（`.osv`）/ Insta360（`.insv`）などのデュアル魚眼動画から、Agisoft Metashape用のフレーム画像を抽出するツールです。Streamlit GUI とCLIの両方に対応しています。
 
 ## 特徴
 
+- **Streamlit GUI** でフレーム抽出からマスク生成までワンストップで実行
 - デュアル魚眼動画の **front / back 2ストリーム** を個別に抽出
 - **シャープネス選択**（デフォルトON）: 各ウィンドウから最もブレの少ないフレームを自動選択
 - **LUT適用**（デフォルトON）: D-Log M → Rec.709 など `.cube` LUTを自動検出・適用
 - **10bit対応**: 16bit PNG / TIFF 出力で10bit D-Log M等の階調を保持
 - **複数動画の連番抽出**: 2台同時撮影などで複数ファイルをまとめて通し連番で出力
-- **対話モード**: 出力形式・FPS設定・回転方向確認をステップバイステップで実行
-- **回転補正**: front / back で独立した回転角度を指定可能（テストフレームによる目視確認）
+- **SAM3マスク生成**: front/back を `--file-pattern` で分離し、動的オブジェクト除去マスクを生成
+- **回転補正**: front / back で独立した回転角度を指定可能
 - **Metashape命名規則** に準拠したファイル名で出力
-- **ドラッグ＆ドロップ対応** のバッチファイル付き
 
 ## 必要環境
 
 - Python 3.10+
 - [FFmpeg](https://ffmpeg.org/)（`ffmpeg` / `ffprobe` にパスが通っていること）
 - [Pillow](https://pypi.org/project/Pillow/) / [NumPy](https://pypi.org/project/numpy/)（シャープネス選択に必要）
-- Windows（バッチファイル・エクスプローラー連携）
+- [Streamlit](https://streamlit.io/)（GUI使用時）
+- Windows
 
 ```bash
-pip install Pillow numpy
+pip install Pillow numpy streamlit opencv-python
 ```
 
 ## ファイル構成
 
 ```
-extract_dual_fisheye.py   # メインスクリプト
-extract_frames.bat        # ドラッグ＆ドロップ用バッチファイル
+app.py                    # Streamlit GUI
+start_gui.bat             # GUI起動バッチ
+extract_dual_fisheye.py   # フレーム抽出（CLI）
+extract_frames.bat        # ドラッグ＆ドロップ用バッチファイル（CLI）
 *.cube                    # LUTファイル（各自配置、Git追跡対象外）
-frames/                   # デフォルト出力ディレクトリ
+config.json               # GUI設定（自動生成、Git追跡対象外）
 ```
 
 ## セットアップ
@@ -42,12 +45,26 @@ D-Log M で撮影した動画を使う場合、DJI公式サイトから「D-Log 
 
 ## 使い方
 
-### バッチファイル（推奨）
+### GUI（推奨）
 
-`.osv` / `.insv` ファイルを `extract_frames.bat` にドラッグ＆ドロップするだけで実行できます。
-複数ファイルを同時にドロップすると、通し連番で抽出されます。
+`start_gui.bat` をダブルクリック、または：
 
-### コマンドライン
+```bash
+streamlit run app.py
+```
+
+GUIでは以下のステップを順に実行できます：
+
+1. **動画選択** — パス入力 + ffprobeでストリーム情報を表示
+2. **抽出設定** — 出力形式、FPS、回転角度、シャープネス選択、LUT
+3. **フレーム抽出** — リアルタイムログ表示付きで実行
+4. **マスク生成**（任意） — Metashape COLMAP export後の `images/` に対してSAM3マスクを生成
+   - front / back / both を選択可能（`--file-pattern` で自動分離）
+   - マスクオーバーレイプレビュー付き
+
+サイドバーで作業ディレクトリ・LUT・SAM3環境などの共通設定を保存できます。
+
+### CLI
 
 ```bash
 # 対話モード（すべての設定を対話的に選択）
@@ -66,7 +83,7 @@ python extract_dual_fisheye.py input.osv --fps 1 --no-lut --no-sharp
 python extract_dual_fisheye.py input.osv --fps 1 --rotate-front 90 --rotate-back 270
 ```
 
-### オプション一覧
+### CLIオプション一覧
 
 | オプション | 説明 | デフォルト |
 |---|---|---|
@@ -81,7 +98,19 @@ python extract_dual_fisheye.py input.osv --fps 1 --rotate-front 90 --rotate-back
 | `--rotate-front` | front回転角度（0/90/180/270） | 対話で確認 |
 | `--rotate-back` | back回転角度（0/90/180/270） | 対話で確認 |
 
-## 処理の流れ
+## ワークフロー
+
+```
+デュアル魚眼動画(.osv/.insv)
+  → ① フレーム抽出 (extract_dual_fisheye.py) → frames/
+  → ② Metashape SfM + COLMAP export（外部） → images/ + sparse/0/
+  → ③ SAM3 マスク生成 (gen_masks_sam3.py --input-dir images) → masks/
+  → Lichtfeld Studio トレーニング
+```
+
+マスク生成は Metashape が COLMAP export 時に生成するパースペクティブ補正済みの `images/` に対して実行します。魚眼の `frames/` ではなく、歪み補正済み画像を対象とすることで SAM3 の検出精度を確保しています。
+
+## 処理の流れ（フレーム抽出）
 
 1. **ストリーム情報取得** — ffprobeで動画の2ストリーム（front/back）を検出、ビット深度・pix_fmtを表示
 2. **LUT設定** — スクリプトと同じフォルダから `.cube` ファイルを自動検出
