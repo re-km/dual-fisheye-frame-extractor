@@ -2,3 +2,4 @@ frames/
 __pycache__/
 *.pyc
 *.cube
+config.json
