@@ -2,15 +2,18 @@
 
 DJI Osmo 360（`.osv`）/ Insta360（`.insv`）などのデュアル魚眼動画から、Agisoft Metashape用のフレーム画像を抽出するツールです。Streamlit GUI とCLIの両方に対応しています。
 
+> **注意**: 本ツールはMetashapeへ入力する魚眼フレームの準備が主目的です。マスク生成は Metashape で SfM → COLMAP export を行った後のパースペクティブ画像に対して実行するため、外部スクリプト（`gen_masks_sam3.py`）と Metashape が別途必要です。
+
 ## 特徴
 
-- **Streamlit GUI** でフレーム抽出からマスク生成までワンストップで実行
+- **Streamlit GUI** でフレーム抽出・露出補正・マスク生成を順に実行
 - デュアル魚眼動画の **front / back 2ストリーム** を個別に抽出
 - **シャープネス選択**（デフォルトON）: 各ウィンドウから最もブレの少ないフレームを自動選択
 - **LUT適用**（デフォルトON）: D-Log M → Rec.709 など `.cube` LUTを自動検出・適用
 - **10bit対応**: 16bit PNG / TIFF 出力で10bit D-Log M等の階調を保持
 - **複数動画の連番抽出**: 2台同時撮影などで複数ファイルをまとめて通し連番で出力
-- **SAM3マスク生成**: front/back を `--file-pattern` で分離し、動的オブジェクト除去マスクを生成
+- **露出補正**: 白飛び・暗すぎフレームをガンマ補正で自動調整（3DGSフローター予防）
+- **SAM3マスク生成**（要外部スクリプト）: Metashape COLMAP export後のパースペクティブ画像に対し、front/back を `--file-pattern` で分離してマスクを生成
 - **回転補正**: front / back で独立した回転角度を指定可能
 - **Metashape命名規則** に準拠したファイル名で出力
 
@@ -29,9 +32,10 @@ pip install Pillow numpy streamlit opencv-python
 ## ファイル構成
 
 ```
-app.py                    # Streamlit GUI
+app.py                    # Streamlit GUI（抽出→露出補正→マスク生成）
 start_gui.bat             # GUI起動バッチ
 extract_dual_fisheye.py   # フレーム抽出（CLI）
+adjust_exposure.py        # 露出補正（白飛び・暗すぎのガンマ補正）
 extract_frames.bat        # ドラッグ＆ドロップ用バッチファイル（CLI）
 *.cube                    # LUTファイル（各自配置、Git追跡対象外）
 config.json               # GUI設定（自動生成、Git追跡対象外）
@@ -58,7 +62,12 @@ GUIでは以下のステップを順に実行できます：
 1. **動画選択** — パス入力 + ffprobeでストリーム情報を表示
 2. **抽出設定** — 出力形式、FPS、回転角度、シャープネス選択、LUT
 3. **フレーム抽出** — リアルタイムログ表示付きで実行
+3.5. **露出補正**（任意） — 白飛び・暗すぎフレームの検出とガンマ補正
+   - dry-run（分析のみ）/ 実行 / 復元 の3モード
+   - しきい値・目標輝度をGUIで調整可能
 4. **マスク生成**（任意） — Metashape COLMAP export後の `images/` に対してSAM3マスクを生成
+   - **前提**: Metashapeで SfM → COLMAP形式 export を完了していること
+   - 外部スクリプト `gen_masks_sam3.py`（`3dgs_work_flow/` に配置）を呼び出し
    - front / back / both を選択可能（`--file-pattern` で自動分離）
    - マスクオーバーレイプレビュー付き
 
@@ -102,13 +111,16 @@ python extract_dual_fisheye.py input.osv --fps 1 --rotate-front 90 --rotate-back
 
 ```
 デュアル魚眼動画(.osv/.insv)
-  → ① フレーム抽出 (extract_dual_fisheye.py) → frames/
-  → ② Metashape SfM + COLMAP export（外部） → images/ + sparse/0/
-  → ③ SAM3 マスク生成 (gen_masks_sam3.py --input-dir images) → masks/
-  → Lichtfeld Studio トレーニング
+  → ① フレーム抽出 (extract_dual_fisheye.py)          → frames/
+  → ② 露出補正 (adjust_exposure.py)（任意）            → frames/（上書き）
+  → ③ Metashape SfM + COLMAP export（外部ツール）      → images/ + sparse/0/
+  → ④ SAM3 マスク生成 (gen_masks_sam3.py)（任意）      → masks/
+  → ⑤ Lichtfeld Studio トレーニング（外部ツール）
 ```
 
-マスク生成は Metashape が COLMAP export 時に生成するパースペクティブ補正済みの `images/` に対して実行します。魚眼の `frames/` ではなく、歪み補正済み画像を対象とすることで SAM3 の検出精度を確保しています。
+本ツールが担当するのは ①②（フレーム画像の準備）です。③以降は Metashape や Lichtfeld Studio など外部ツールが必要です。
+
+マスク生成（④）は Metashape が COLMAP export 時に生成するパースペクティブ補正済みの `images/` に対して実行します。魚眼の `frames/` ではなく、歪み補正済み画像を対象とすることで SAM3 の検出精度を確保しています。
 
 ## 処理の流れ（フレーム抽出）
 
