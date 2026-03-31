@@ -57,6 +57,7 @@ def run_command(cmd: list[str], log_container) -> int:
     log_lines = []
     env = dict(os.environ)
     env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -286,6 +287,98 @@ if st.button("フレーム抽出を実行", type="primary",
     else:
         st.error(f"エラー（終了コード: {rc}）")
 
+
+# --- Step 3.5: 露出補正（任意） ---
+st.header("Step 3.5: 露出補正（任意）")
+
+st.caption("白飛きフレームの輝度を下げ、3DGSフローター発生を予防する")
+
+enable_exposure = st.checkbox("露出補正を有効にする", value=False,
+                               help="抽出済みフレームの白飛び・暗すぎを検出し、ガンマ補正で調整")
+
+if enable_exposure:
+    exp_frames_dir = Path(work_dir) / "frames" if work_dir else None
+
+    col_exp1, col_exp2 = st.columns(2)
+    with col_exp1:
+        st.subheader("白飛び検出")
+        bright_mean = st.number_input(
+            "平均輝度しきい値", 100.0, 255.0, 180.0, key="exp_bright_mean",
+            help="平均輝度がこれ以上で白飛び候補")
+        bright_overexposed = st.number_input(
+            "白飛き画素率しきい値", 0.0, 1.0, 0.10, step=0.01,
+            key="exp_bright_clip",
+            help="画素の白飛び率がこれ以上で白飛き候補")
+        bright_target = st.number_input(
+            "補正目標輝度", 80.0, 200.0, 130.0, key="exp_bright_target",
+            help="白飛きフレームをこの輝度に補正")
+
+    with col_exp2:
+        st.subheader("暗すぎ検出")
+        dark_threshold = st.number_input(
+            "暗部しきい値", 10.0, 150.0, 60.0, key="exp_dark_thresh",
+            help="平均輝度がこれ以下で暗すぎ")
+        dark_target = st.number_input(
+            "補正目標輝度", 50.0, 200.0, 100.0, key="exp_dark_target",
+            help="暗フレームをこの輝度に補正")
+
+    col_exp_btn1, col_exp_btn2, col_exp_btn3 = st.columns(3)
+
+    with col_exp_btn1:
+        if st.button("分析のみ (dry-run)", key="exp_dryrun",
+                      disabled=not (exp_frames_dir and exp_frames_dir.exists())):
+            cmd = [
+                sys.executable, str(SCRIPT_DIR / "adjust_exposure.py"),
+                "--frames-dir", str(exp_frames_dir),
+                "--bright-mean", str(bright_mean),
+                "--bright-overexposed-min", str(bright_overexposed),
+                "--dark-threshold", str(dark_threshold),
+                "--bright-target-mean", str(bright_target),
+                "--dark-target-mean", str(dark_target),
+                "--dry-run",
+            ]
+            st.info(f"実行コマンド:\n```\n{' '.join(cmd)}\n```")
+            log_area = st.empty()
+            rc = run_command(cmd, log_area)
+            if rc == 0:
+                st.success("分析完了（画像は変更されていません）")
+            else:
+                st.error(f"エラー（終了コード: {rc}）")
+
+    with col_exp_btn2:
+        if st.button("露出補正を実行", type="primary", key="exp_run",
+                      disabled=not (exp_frames_dir and exp_frames_dir.exists())):
+            cmd = [
+                sys.executable, str(SCRIPT_DIR / "adjust_exposure.py"),
+                "--frames-dir", str(exp_frames_dir),
+                "--bright-mean", str(bright_mean),
+                "--bright-overexposed-min", str(bright_overexposed),
+                "--dark-threshold", str(dark_threshold),
+                "--bright-target-mean", str(bright_target),
+                "--dark-target-mean", str(dark_target),
+            ]
+            st.info(f"実行コマンド:\n```\n{' '.join(cmd)}\n```")
+            log_area = st.empty()
+            rc = run_command(cmd, log_area)
+            if rc == 0:
+                st.success("露出補正完了")
+            else:
+                st.error(f"エラー（終了コード: {rc}）")
+
+    with col_exp_btn3:
+        if st.button("元画像に復元", key="exp_restore",
+                      disabled=not (exp_frames_dir and exp_frames_dir.exists())):
+            cmd = [
+                sys.executable, str(SCRIPT_DIR / "adjust_exposure.py"),
+                "--frames-dir", str(exp_frames_dir),
+                "--restore",
+            ]
+            log_area = st.empty()
+            rc = run_command(cmd, log_area)
+            if rc == 0:
+                st.success("復元完了")
+            else:
+                st.error(f"エラー（終了コード: {rc}）")
 
 # --- Step 4: マスク生成（任意） ---
 st.header("Step 4: マスク生成（任意）")
