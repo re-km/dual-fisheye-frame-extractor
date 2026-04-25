@@ -5,7 +5,8 @@
   Step 1: 動画選択 — パス入力 + ffprobeでストリーム情報表示
   Step 2: 抽出設定 — 形式, FPS, 回転, シャープネス, LUT
   Step 3: フレーム抽出 — extract_dual_fisheye.py をsubprocessで実行
-  Step 4: マスク生成（任意） — gen_masks_sam3.py を --file-pattern付きで呼出
+  Step 4: 露出補正（任意） — adjust_exposure.py
+  Step 5: マスク生成（任意） — gen_masks_sam3.py を --file-pattern付きで呼出
   出力サマリー + マスクオーバーレイプレビュー
 
 起動:
@@ -137,6 +138,40 @@ def file_count(path: Path, pattern: str = "*") -> int:
     return 0
 
 
+_TRANSPOSE_FILTERS = {
+    0: None,
+    90: "transpose=1",
+    180: "transpose=1,transpose=1",
+    270: "transpose=2",
+}
+
+
+def extract_rotation_preview(input_path: str, stream_index: int,
+                             rotation: int, out_path: Path,
+                             timestamp: str = "10") -> bool:
+    """指定ストリーム・回転で1フレーム抽出（プレビュー用）"""
+    filters = [f"scale=480:-2"]
+    t = _TRANSPOSE_FILTERS.get(rotation)
+    if t:
+        filters.insert(0, t)
+    vf = ",".join(filters)
+    cmd = [
+        "ffmpeg", "-v", "error",
+        "-noautorotate",
+        "-ss", timestamp,
+        "-i", str(input_path),
+        "-map", f"0:v:{stream_index}",
+        "-vf", vf,
+        "-frames:v", "1",
+        "-q:v", "5",
+        "-update", "1",
+        str(out_path),
+        "-y",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    return result.returncode == 0 and out_path.exists()
+
+
 # ===== Streamlit UI =====
 
 st.set_page_config(page_title="デュアル魚眼フレーム抽出", layout="wide")
@@ -176,7 +211,15 @@ video_paths_text = st.text_area(
     help=".osv / .insv ファイルパスを入力",
 )
 
-video_paths = [p.strip() for p in video_paths_text.strip().splitlines() if p.strip()]
+def _clean_path(p: str) -> str:
+    p = p.strip().strip('\u200b\u200e\u200f\ufeff\u00a0')
+    p = p.strip()
+    if len(p) >= 2 and p[0] == p[-1] and p[0] in ('"', "'"):
+        p = p[1:-1].strip()
+    return p
+
+
+video_paths = [_clean_path(p) for p in video_paths_text.strip().splitlines() if p.strip()]
 
 if video_paths:
     first_video = video_paths[0]
@@ -186,9 +229,9 @@ if video_paths:
             st.success(f"ストリーム検出: {len(streams)} 個")
             col1, col2 = st.columns(2)
             with col1:
-                st.code(format_stream_info(streams[0], "front (0:v:0)"))
+                st.code(format_stream_info(streams[0], "フロント (0:v:0)"))
             with col2:
-                st.code(format_stream_info(streams[1], "back  (0:v:1)"))
+                st.code(format_stream_info(streams[1], "バック  (0:v:1)"))
 
             duration = get_duration(first_video)
             if duration:
@@ -202,7 +245,26 @@ if video_paths:
             streams = None
             is_high_bit = False
     else:
-        st.error(f"ファイルが見つかりません: {first_video}")
+        resolved = Path(first_video).resolve()
+        byte_repr = first_video.encode("unicode_escape").decode("ascii")
+        parent = Path(first_video).parent
+        parent_exists = parent.exists()
+        siblings_hint = ""
+        if parent_exists:
+            try:
+                matches = [p.name for p in parent.iterdir()
+                           if p.name.lower().startswith(Path(first_video).stem.lower()[:6])]
+                if matches:
+                    siblings_hint = "\n  類似ファイル: " + ", ".join(matches[:5])
+            except OSError:
+                pass
+        st.error(
+            f"ファイルが見つかりません:\n"
+            f"  入力文字列: `{first_video}`\n"
+            f"  エスケープ表示: `{byte_repr}`\n"
+            f"  解決後: `{resolved}`\n"
+            f"  親フォルダ存在: {parent_exists}" + siblings_hint
+        )
         streams = None
         is_high_bit = False
 else:
@@ -236,11 +298,68 @@ with col_sharp:
     use_sharp = st.checkbox("シャープネス選択", value=True,
                             help="ウィンドウ内で最もシャープなフレームを選択")
 
-col_rot_f, col_rot_b = st.columns(2)
-with col_rot_f:
-    rot_front = st.selectbox("Front 回転", ROTATION_OPTIONS, index=0)
-with col_rot_b:
-    rot_back = st.selectbox("Back 回転", ROTATION_OPTIONS, index=0)
+st.subheader("回転設定（動画ごと）")
+video_rotations: list[tuple[int, int]] = []
+if video_paths:
+    for vi, vp in enumerate(video_paths):
+        st.caption(f"動画 {vi + 1}: `{Path(vp).name}`")
+        col_rot_f, col_rot_b = st.columns(2)
+        with col_rot_f:
+            rf = st.selectbox("フロント 回転", ROTATION_OPTIONS, index=0,
+                              key=f"rot_front_{vi}")
+        with col_rot_b:
+            rb = st.selectbox("バック 回転", ROTATION_OPTIONS, index=0,
+                              key=f"rot_back_{vi}")
+        video_rotations.append((rf, rb))
+else:
+    st.caption("動画を入力すると回転選択が表示されます。")
+
+with st.expander("回転プレビュー（動画10秒地点から4方向を抽出）"):
+    if not (video_paths and streams and work_dir):
+        st.caption("動画選択と作業ディレクトリ設定後に利用できます。")
+    else:
+        col_btn, col_ts = st.columns([2, 1])
+        with col_ts:
+            preview_ts = st.text_input("抽出時刻 [秒]", value="10",
+                                       help="動画開始からの秒数。暗い/白飛びの場合は変更")
+        with col_btn:
+            if st.button("回転プレビューを生成"):
+                preview_dir = Path(work_dir) / "_rotation_preview"
+                preview_dir.mkdir(parents=True, exist_ok=True)
+                previews = {}
+                with st.spinner("テストフレームを抽出中..."):
+                    for vi, vp in enumerate(video_paths):
+                        per_video = {"front": {}, "back": {}}
+                        for label, sidx in (("front", 0), ("back", 1)):
+                            for rot in ROTATION_OPTIONS:
+                                out_path = preview_dir / f"v{vi}_{label}_{rot}deg.jpg"
+                                ok = extract_rotation_preview(
+                                    vp, sidx, rot, out_path, preview_ts
+                                )
+                                if ok:
+                                    per_video[label][rot] = str(out_path)
+                        previews[vi] = {"path": vp, "frames": per_video}
+                st.session_state["rotation_preview"] = previews
+
+        previews = st.session_state.get("rotation_preview")
+        label_ja = {"front": "フロント", "back": "バック"}
+        if previews:
+            for vi in sorted(previews.keys()):
+                entry = previews[vi]
+                st.markdown(f"#### 動画 {vi + 1}: `{Path(entry['path']).name}`")
+                for label in ("front", "back"):
+                    frames = entry["frames"].get(label, {})
+                    if not frames:
+                        continue
+                    st.markdown(f"**{label_ja[label]}**")
+                    cols = st.columns(4)
+                    for i, rot in enumerate(ROTATION_OPTIONS):
+                        p = frames.get(rot)
+                        with cols[i]:
+                            if p and Path(p).exists():
+                                st.image(p, caption=f"{rot}°", use_container_width=True)
+                            else:
+                                st.caption(f"{rot}° — 失敗")
 
 lut_option = st.radio("LUT", ["自動検出", "指定パス", "なし"], horizontal=True)
 
@@ -266,8 +385,11 @@ if st.button("フレーム抽出を実行", type="primary",
     cmd.extend(["--format", fmt])
     if fmt == "jpg":
         cmd.extend(["--quality", str(quality)])
-    cmd.extend(["--rotate-front", str(rot_front)])
-    cmd.extend(["--rotate-back", str(rot_back)])
+    if video_rotations:
+        cmd.append("--rotate-front")
+        cmd.extend(str(rf) for rf, _ in video_rotations)
+        cmd.append("--rotate-back")
+        cmd.extend(str(rb) for _, rb in video_rotations)
     if not use_sharp:
         cmd.append("--no-sharp")
 
@@ -288,10 +410,10 @@ if st.button("フレーム抽出を実行", type="primary",
         st.error(f"エラー（終了コード: {rc}）")
 
 
-# --- Step 3.5: 露出補正（任意） ---
-st.header("Step 3.5: 露出補正（任意）")
+# --- Step 4: 露出補正（任意） ---
+st.header("Step 4: 露出補正（任意）")
 
-st.caption("白飛きフレームの輝度を下げ、3DGSフローター発生を予防する")
+st.caption("白飛びフレームの輝度を下げ、3DGSフローター発生を予防する")
 
 enable_exposure = st.checkbox("露出補正を有効にする", value=False,
                                help="抽出済みフレームの白飛び・暗すぎを検出し、ガンマ補正で調整")
@@ -306,12 +428,12 @@ if enable_exposure:
             "平均輝度しきい値", 100.0, 255.0, 180.0, key="exp_bright_mean",
             help="平均輝度がこれ以上で白飛び候補")
         bright_overexposed = st.number_input(
-            "白飛き画素率しきい値", 0.0, 1.0, 0.10, step=0.01,
+            "白飛び画素率しきい値", 0.0, 1.0, 0.10, step=0.01,
             key="exp_bright_clip",
-            help="画素の白飛び率がこれ以上で白飛き候補")
+            help="画素の白飛び率がこれ以上で白飛び候補")
         bright_target = st.number_input(
             "補正目標輝度", 80.0, 200.0, 130.0, key="exp_bright_target",
-            help="白飛きフレームをこの輝度に補正")
+            help="白飛びフレームをこの輝度に補正")
 
     with col_exp2:
         st.subheader("暗すぎ検出")
@@ -380,8 +502,8 @@ if enable_exposure:
             else:
                 st.error(f"エラー（終了コード: {rc}）")
 
-# --- Step 4: マスク生成（任意） ---
-st.header("Step 4: マスク生成（任意）")
+# --- Step 5: マスク生成（任意） ---
+st.header("Step 5: マスク生成（任意）")
 
 st.caption("SAM 3 による動的オブジェクト除去マスク — Metashape/COLMAP export後の images/ に適用")
 

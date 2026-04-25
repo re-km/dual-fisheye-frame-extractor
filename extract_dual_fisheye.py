@@ -505,20 +505,35 @@ def rename_frames(output_dir: Path, prefix: str, count: int,
     return seq
 
 
+def _pick_rotation(value, vid_idx: int) -> int | None:
+    """リスト or 単一値 or None から対象動画の回転値を取り出す"""
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return None
+        return value[vid_idx] if vid_idx < len(value) else value[-1]
+    return value
+
+
 def resolve_rotation(streams: list[dict], input_path: Path,
-                     args_rotate_front: int | None,
-                     args_rotate_back: int | None,
-                     lut_path: Path | None = None) -> tuple[int, int]:
+                     args_rotate_front,
+                     args_rotate_back,
+                     lut_path: Path | None = None,
+                     vid_idx: int = 0) -> tuple[int, int]:
     """メタデータ → 引数 → 対話の優先順で回転を決定"""
     meta_rot_front = get_rotation(streams[0])
     meta_rot_back = get_rotation(streams[1])
 
+    rf = _pick_rotation(args_rotate_front, vid_idx)
+    rb = _pick_rotation(args_rotate_back, vid_idx)
+
     if meta_rot_front or meta_rot_back:
         print(f"  回転補正（メタデータ検出）: front={meta_rot_front}°, back={meta_rot_back}°")
         return meta_rot_front, meta_rot_back
-    elif args_rotate_front is not None and args_rotate_back is not None:
-        print(f"  回転補正（引数指定）: front={args_rotate_front}°, back={args_rotate_back}°")
-        return args_rotate_front, args_rotate_back
+    elif rf is not None and rb is not None:
+        print(f"  回転補正（引数指定）: front={rf}°, back={rb}°")
+        return rf, rb
     else:
         return prompt_rotation(input_path, lut_path)
 
@@ -584,10 +599,12 @@ def main():
                         help="LUT適用をスキップ（フラットな色のまま抽出）")
     parser.add_argument("--no-sharp", action="store_true",
                         help="シャープネス選択を無効化（固定間隔で抽出）")
-    parser.add_argument("--rotate-front", type=int, default=None, choices=[0, 90, 180, 270],
-                        help="front回転角度を直接指定")
-    parser.add_argument("--rotate-back", type=int, default=None, choices=[0, 90, 180, 270],
-                        help="back回転角度を直接指定")
+    parser.add_argument("--rotate-front", type=int, default=None, nargs="+",
+                        choices=[0, 90, 180, 270],
+                        help="front回転角度を直接指定。動画数ぶん並べると動画ごとに適用（1個なら全動画共通）")
+    parser.add_argument("--rotate-back", type=int, default=None, nargs="+",
+                        choices=[0, 90, 180, 270],
+                        help="back回転角度を直接指定。動画数ぶん並べると動画ごとに適用（1個なら全動画共通）")
     args = parser.parse_args()
 
     input_files = args.input
@@ -700,7 +717,8 @@ def main():
             source_fps = get_source_fps(streams[0])
 
         rot_front, rot_back = resolve_rotation(
-            streams, input_path, args.rotate_front, args.rotate_back, lut_path)
+            streams, input_path, args.rotate_front, args.rotate_back, lut_path,
+            vid_idx=vid_idx - 1)
 
         print(f"\nフレーム抽出中（fps={fps}, format={fmt_label}, "
               f"LUT={lut_label}, シャープ選択={sharp_label}）...")
